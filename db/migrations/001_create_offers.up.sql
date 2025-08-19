@@ -1,0 +1,10 @@
+-- offers
+CREATE TABLE IF NOT EXISTS offers (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  min_stake NUMERIC NOT NULL,
+  bonus_pct NUMERIC NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+

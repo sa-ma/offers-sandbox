@@ -1,0 +1,169 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --check=false
+      # Expose Kafka on 0.0.0.0:9092 inside the container network
+      - --kafka-addr=0.0.0.0:9092
+      # Make brokers advertise the Docker DNS name to other containers
+      - --advertise-kafka-addr=redpanda:9092
+      - --set
+      - redpanda.auto_create_topics_enabled=true
+    ports:
+      - '9092:9092'
+      - '9644:9644'
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: offers
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:4
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations:/migrations
+    entrypoint: ['/usr/bin/migrate']
+    command: ['-path', '/migrations', '-database', '${POSTGRES_DSN}', 'up']
+    restart: 'on-failure'
+
+  api:
+    build: ./services/api
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      PORT: '8080'
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      migrate:
+        condition: service_started
+    ports:
+      - '8080:8080'
+
+  engine:
+    build: ./services/engine
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      POSTGRES_DSN: ${POSTGRES_DSN}
+      GROUP_ID: offer-engine
+      BET_TOPIC: ${BET_TOPIC:-events.bet_qualified}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      kafka-init:
+        condition: service_started
+
+  simulator:
+    build: ./services/simulator
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      TICK_SECONDS: ${TICK_SECONDS:-2}
+    depends_on:
+      redpanda:
+        condition: service_started
+      kafka-init:
+        condition: service_started
+
+  gateway:
+    build: ./services/gateway
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      PORT: '8083'
+      TOPIC: events.offer_awarded
+    depends_on:
+      redpanda:
+        condition: service_started
+      kafka-init:
+        condition: service_started
+    ports:
+      - '8083:8083'
+
+  web:
+    build: ./web/app
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
+      VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8083/ws}
+    depends_on:
+      - api
+      - gateway
+    ports:
+      - '3000:80'
+
+  flink-jobmanager:
+    image: flink:1.18.1-scala_2.12-java11
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+    command: jobmanager
+    depends_on:
+      redpanda:
+        condition: service_started
+    ports:
+      - '8081:8081'
+
+  flink-taskmanager:
+    image: flink:1.18.1-scala_2.12-java11
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+    command: taskmanager
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+
+  stake-gate:
+    build: ./services/flink-job
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS}
+      INPUT_TOPIC: events.bet_placed
+      OUTPUT_TOPIC: events.bet_qualified
+      MIN_WINDOW_STAKE: ${MIN_WINDOW_STAKE:-50}
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+      flink-taskmanager:
+        condition: service_started
+      redpanda:
+        condition: service_started
+      kafka-init:
+        condition: service_started
+
+  kafka-init:
+    image: redpandadata/redpanda:latest
+    depends_on:
+      redpanda:
+        condition: service_started
+    entrypoint: ["/bin/sh","-c"]
+    command: |
+      until rpk cluster info --brokers=redpanda:9092 >/dev/null 2>&1; do echo "waiting for redpanda"; sleep 1; done
+      rpk topic create --brokers=redpanda:9092 events.bet_placed offers.rules events.offer_awarded events.bet_qualified || true
+
+volumes:
+  postgres-data:
