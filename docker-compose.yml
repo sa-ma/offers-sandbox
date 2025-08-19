@@ -1,6 +1,8 @@
 services:
   redpanda:
     image: redpandadata/redpanda:latest
+    env_file:
+      - .env
     command:
       - redpanda
       - start
@@ -21,10 +23,12 @@ services:
 
   postgres:
     image: postgres:16
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: offers
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     ports:
@@ -37,6 +41,8 @@ services:
 
   migrate:
     image: migrate/migrate:4
+    env_file:
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,11 +54,13 @@ services:
 
   api:
     build: ./services/api
+    env_file:
+      - .env
     environment:
       KAFKA_BROKERS: ${KAFKA_BROKERS}
       POSTGRES_DSN: ${POSTGRES_DSN}
       PORT: '8080'
-      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      CORS_ORIGINS: ${CORS_ORIGINS}
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,11 +73,13 @@ services:
 
   engine:
     build: ./services/engine
+    env_file:
+      - .env
     environment:
       KAFKA_BROKERS: ${KAFKA_BROKERS}
       POSTGRES_DSN: ${POSTGRES_DSN}
       GROUP_ID: offer-engine
-      BET_TOPIC: ${BET_TOPIC:-events.bet_qualified}
+      BET_TOPIC: ${BET_TOPIC}
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,9 +90,11 @@ services:
 
   simulator:
     build: ./services/simulator
+    env_file:
+      - .env
     environment:
       KAFKA_BROKERS: ${KAFKA_BROKERS}
-      TICK_SECONDS: ${TICK_SECONDS:-2}
+      TICK_SECONDS: ${TICK_SECONDS}
     depends_on:
       redpanda:
         condition: service_started
@@ -91,6 +103,8 @@ services:
 
   gateway:
     build: ./services/gateway
+    env_file:
+      - .env
     environment:
       KAFKA_BROKERS: ${KAFKA_BROKERS}
       PORT: '8083'
@@ -105,9 +119,11 @@ services:
 
   web:
     build: ./web/app
+    env_file:
+      - .env
     environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
-      VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8083/ws}
+      VITE_API_URL: ${VITE_API_URL}
+      VITE_WS_URL: ${VITE_WS_URL}
     depends_on:
       - api
       - gateway
@@ -120,6 +136,15 @@ services:
       JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
+        heartbeat.interval: 10000
+        heartbeat.timeout: 50000
+        akka.ask.timeout: 50s
+        akka.lookup.timeout: 50s
+        akka.tcp.timeout: 50s
+        akka.transport.heartbeat.interval: 10s
+        akka.transport.heartbeat.pause: 50s
+        akka.transport.failure-detector.threshold: 50.0
+        akka.transport.failure-detector.acceptable-heartbeat-pause: 60s
     command: jobmanager
     depends_on:
       redpanda:
@@ -133,6 +158,15 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: flink-jobmanager
         taskmanager.numberOfTaskSlots: 2
+        heartbeat.interval: 10000
+        heartbeat.timeout: 50000
+        akka.ask.timeout: 50s
+        akka.lookup.timeout: 50s
+        akka.tcp.timeout: 50s
+        akka.transport.heartbeat.interval: 10s
+        akka.transport.heartbeat.pause: 50s
+        akka.transport.failure-detector.threshold: 50.0
+        akka.transport.failure-detector.acceptable-heartbeat-pause: 60s
     command: taskmanager
     depends_on:
       flink-jobmanager:
@@ -140,11 +174,13 @@ services:
 
   stake-gate:
     build: ./services/flink-job
+    env_file:
+      - .env
     environment:
       KAFKA_BROKERS: ${KAFKA_BROKERS}
       INPUT_TOPIC: events.bet_placed
       OUTPUT_TOPIC: events.bet_qualified
-      MIN_WINDOW_STAKE: ${MIN_WINDOW_STAKE:-50}
+      MIN_WINDOW_STAKE: ${MIN_WINDOW_STAKE}
     depends_on:
       flink-jobmanager:
         condition: service_started
@@ -160,7 +196,7 @@ services:
     depends_on:
       redpanda:
         condition: service_started
-    entrypoint: ["/bin/sh","-c"]
+    entrypoint: ['/bin/sh', '-c']
     command: |
       until rpk cluster info --brokers=redpanda:9092 >/dev/null 2>&1; do echo "waiting for redpanda"; sleep 1; done
       rpk topic create --brokers=redpanda:9092 events.bet_placed offers.rules events.offer_awarded events.bet_qualified || true
